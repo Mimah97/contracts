@@ -203,7 +203,7 @@ fn test_procedure_documentation_flow() {
 }
 
 #[test]
-#[should_panic(expected = "NotFound")]
+#[should_panic(expected = "Error(Contract, #1)")]
 fn test_not_found() {
     let (env, client) = create_env();
     let tooth_num = String::from_str(&env, "8");
