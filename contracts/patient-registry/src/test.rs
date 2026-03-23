@@ -167,7 +167,9 @@ fn test_grant_access_and_add_medical_record() {
 
     env.mock_all_auths();
 
-    client.initialize(&admin);
+    let treasury = Address::generate(&env);
+    let fee_token = Address::generate(&env);
+    client.initialize(&admin, &treasury, &fee_token);
     client.publish_consent_version(&v1);
     client.acknowledge_consent(&patient, &patient, &v1);
     client.grant_access(&patient, &patient, &doctor);
@@ -233,7 +235,7 @@ fn test_consent_status_never_signed() {
     let patient = Address::generate(&env);
 
     env.mock_all_auths();
-    client.initialize(&Address::generate(&env));
+    client.initialize(&Address::generate(&env), &Address::generate(&env), &Address::generate(&env));
 
     assert_eq!(client.get_consent_status(&patient), ConsentStatus::NeverSigned);
 }
@@ -247,7 +249,9 @@ fn test_consent_status_never_signed_no_ack() {
     let patient = Address::generate(&env);
 
     env.mock_all_auths();
-    client.initialize(&admin);
+    let treasury = Address::generate(&env);
+    let fee_token = Address::generate(&env);
+    client.initialize(&admin, &treasury, &fee_token);
     client.publish_consent_version(&make_version(&env, 1));
 
     // Version published but patient never acknowledged
@@ -264,7 +268,9 @@ fn test_consent_status_acknowledged() {
     let v1 = make_version(&env, 1);
 
     env.mock_all_auths();
-    client.initialize(&admin);
+    let treasury = Address::generate(&env);
+    let fee_token = Address::generate(&env);
+    client.initialize(&admin, &treasury, &fee_token);
     client.publish_consent_version(&v1);
     client.acknowledge_consent(&patient, &patient, &v1);
 
@@ -282,7 +288,9 @@ fn test_consent_status_pending_after_new_version() {
     let v2 = make_version(&env, 2);
 
     env.mock_all_auths();
-    client.initialize(&admin);
+    let treasury = Address::generate(&env);
+    let fee_token = Address::generate(&env);
+    client.initialize(&admin, &treasury, &fee_token);
     client.publish_consent_version(&v1);
     client.acknowledge_consent(&patient, &patient, &v1);
 
@@ -302,7 +310,9 @@ fn test_consent_re_acknowledge_restores_acknowledged() {
     let v2 = make_version(&env, 2);
 
     env.mock_all_auths();
-    client.initialize(&admin);
+    let treasury = Address::generate(&env);
+    let fee_token = Address::generate(&env);
+    client.initialize(&admin, &treasury, &fee_token);
     client.publish_consent_version(&v1);
     client.acknowledge_consent(&patient, &patient, &v1);
     client.publish_consent_version(&v2);
@@ -321,7 +331,9 @@ fn test_acknowledge_wrong_version_panics() {
     let patient = Address::generate(&env);
 
     env.mock_all_auths();
-    client.initialize(&admin);
+    let treasury = Address::generate(&env);
+    let fee_token = Address::generate(&env);
+    client.initialize(&admin, &treasury, &fee_token);
     client.publish_consent_version(&make_version(&env, 1));
     client.acknowledge_consent(&patient, &patient, &make_version(&env, 99));
 }
@@ -337,7 +349,9 @@ fn test_add_record_blocked_without_consent() {
     let doctor = Address::generate(&env);
 
     env.mock_all_auths();
-    client.initialize(&admin);
+    let treasury = Address::generate(&env);
+    let fee_token = Address::generate(&env);
+    client.initialize(&admin, &treasury, &fee_token);
     client.publish_consent_version(&make_version(&env, 1));
     // Patient never acknowledges
     client.grant_access(&patient, &patient, &doctor);
@@ -360,7 +374,9 @@ fn test_add_record_allowed_after_consent() {
     let v1 = make_version(&env, 1);
 
     env.mock_all_auths();
-    client.initialize(&admin);
+    let treasury = Address::generate(&env);
+    let fee_token = Address::generate(&env);
+    client.initialize(&admin, &treasury, &fee_token);
     client.publish_consent_version(&v1);
     client.acknowledge_consent(&patient, &patient, &v1);
     client.grant_access(&patient, &patient, &doctor);
@@ -387,7 +403,9 @@ fn test_add_record_blocked_after_new_version() {
     let v2 = make_version(&env, 2);
 
     env.mock_all_auths();
-    client.initialize(&admin);
+    let treasury = Address::generate(&env);
+    let fee_token = Address::generate(&env);
+    client.initialize(&admin, &treasury, &fee_token);
     client.publish_consent_version(&v1);
     client.acknowledge_consent(&patient, &patient, &v1);
     client.grant_access(&patient, &patient, &doctor);
@@ -411,7 +429,9 @@ fn setup_with_consent(env: &Env) -> (MedicalRegistryClient, Address) {
     let client = MedicalRegistryClient::new(env, &contract_id);
     let admin = Address::generate(env);
     env.mock_all_auths();
-    client.initialize(&admin);
+    let treasury = Address::generate(&env);
+    let fee_token = Address::generate(&env);
+    client.initialize(&admin, &treasury, &fee_token);
     client.publish_consent_version(&make_version(env, 1));
     (client, admin)
 }
@@ -587,7 +607,9 @@ fn test_first_snapshot_always_allowed() {
     let v1 = make_version(&env, 1);
 
     env.mock_all_auths();
-    client.initialize(&admin);
+    let treasury = Address::generate(&env);
+    let fee_token = Address::generate(&env);
+    client.initialize(&admin, &treasury, &fee_token);
     client.publish_consent_version(&v1);
 
     // No prior snapshot — should succeed at any ledger
@@ -603,7 +625,9 @@ fn test_snapshot_records_ledger_sequence() {
     let admin = Address::generate(&env);
 
     env.mock_all_auths();
-    client.initialize(&admin);
+    let treasury = Address::generate(&env);
+    let fee_token = Address::generate(&env);
+    client.initialize(&admin, &treasury, &fee_token);
 
     let seq_before = env.ledger().sequence();
     client.emit_state_snapshot();
@@ -618,7 +642,9 @@ fn test_get_last_snapshot_ledger_default_zero() {
     let admin = Address::generate(&env);
 
     env.mock_all_auths();
-    client.initialize(&admin);
+    let treasury = Address::generate(&env);
+    let fee_token = Address::generate(&env);
+    client.initialize(&admin, &treasury, &fee_token);
 
     assert_eq!(client.get_last_snapshot_ledger(), None);
 }
@@ -632,7 +658,9 @@ fn test_snapshot_rate_limit_enforced() {
     let admin = Address::generate(&env);
 
     env.mock_all_auths();
-    client.initialize(&admin);
+    let treasury = Address::generate(&env);
+    let fee_token = Address::generate(&env);
+    client.initialize(&admin, &treasury, &fee_token);
     client.emit_state_snapshot();
 
     // Advance ledger by less than 100,000
@@ -658,7 +686,9 @@ fn test_snapshot_allowed_after_interval() {
     let admin = Address::generate(&env);
 
     env.mock_all_auths();
-    client.initialize(&admin);
+    let treasury = Address::generate(&env);
+    let fee_token = Address::generate(&env);
+    client.initialize(&admin, &treasury, &fee_token);
     client.emit_state_snapshot();
 
     let new_seq = env.ledger().sequence() + 100_000;
@@ -686,7 +716,9 @@ fn test_snapshot_includes_registered_patients_and_doctors() {
     let v1 = make_version(&env, 1);
 
     env.mock_all_auths();
-    client.initialize(&admin);
+    let treasury = Address::generate(&env);
+    let fee_token = Address::generate(&env);
+    client.initialize(&admin, &treasury, &fee_token);
     client.publish_consent_version(&v1);
 
     let p1 = Address::generate(&env);
@@ -705,4 +737,145 @@ fn test_snapshot_includes_registered_patients_and_doctors() {
     // Snapshot should succeed — lists are populated
     client.emit_state_snapshot();
     assert_eq!(client.get_last_snapshot_ledger(), Some(env.ledger().sequence()));
+}
+
+/// ------------------------------------------------
+/// FEE TESTS
+/// ------------------------------------------------
+
+fn setup_with_fee(
+    env: &Env,
+) -> (MedicalRegistryClient, Address, Address, Address, Address, Address, BytesN<32>) {
+    let contract_id = env.register(MedicalRegistry, ());
+    let client = MedicalRegistryClient::new(env, &contract_id);
+
+    // Deploy a real SAC token for cross-contract call testing
+    let token_admin = Address::generate(env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_id = token_contract.address();
+    let token_client = soroban_sdk::token::StellarAssetClient::new(env, &token_id);
+
+    let admin = Address::generate(env);
+    let treasury = Address::generate(env);
+    let doctor = Address::generate(env);
+    let patient = Address::generate(env);
+    let v1 = make_version(env, 1);
+
+    env.mock_all_auths();
+
+    client.initialize(&admin, &treasury, &token_id);
+    client.publish_consent_version(&v1);
+    client.acknowledge_consent(&patient, &patient, &v1);
+    client.grant_access(&patient, &patient, &doctor);
+
+    // Mint tokens to doctor so they can pay fees
+    token_client.mint(&doctor, &10_000);
+
+    (client, admin, treasury, token_id, doctor, patient, v1)
+}
+
+#[test]
+fn test_get_record_fee_default_zero() {
+    let env = Env::default();
+    let (client, _admin, _treasury, _token_id, _doctor, _patient, _v1) =
+        setup_with_fee(&env);
+    assert_eq!(client.get_record_fee(), 0);
+}
+
+#[test]
+fn test_set_and_get_record_fee() {
+    let env = Env::default();
+    let (client, _admin, _treasury, _token_id, _doctor, _patient, _v1) =
+        setup_with_fee(&env);
+    client.set_record_fee(&500);
+    assert_eq!(client.get_record_fee(), 500);
+}
+
+#[test]
+fn test_add_record_zero_fee_no_transfer() {
+    let env = Env::default();
+    let (client, _admin, treasury, token_id, doctor, patient, _v1) =
+        setup_with_fee(&env);
+
+    // Fee is 0 — no transfer should occur
+    client.add_medical_record(
+        &patient,
+        &doctor,
+        &Bytes::from_array(&env, &[1, 2, 3]),
+        &String::from_str(&env, "Zero fee record"),
+    );
+
+    let token = soroban_sdk::token::TokenClient::new(&env, &token_id);
+    assert_eq!(token.balance(&treasury), 0);
+    assert_eq!(token.balance(&doctor), 10_000);
+}
+
+#[test]
+fn test_add_record_transfers_fee_to_treasury() {
+    let env = Env::default();
+    let (client, _admin, treasury, token_id, doctor, patient, _v1) =
+        setup_with_fee(&env);
+
+    client.set_record_fee(&200);
+    client.add_medical_record(
+        &patient,
+        &doctor,
+        &Bytes::from_array(&env, &[4, 5, 6]),
+        &String::from_str(&env, "Paid record"),
+    );
+
+    let token = soroban_sdk::token::TokenClient::new(&env, &token_id);
+    assert_eq!(token.balance(&treasury), 200);
+    assert_eq!(token.balance(&doctor), 9_800);
+}
+
+#[test]
+fn test_fee_deducted_per_record() {
+    let env = Env::default();
+    let (client, _admin, treasury, token_id, doctor, patient, _v1) =
+        setup_with_fee(&env);
+
+    client.set_record_fee(&100);
+
+    for i in 0u8..3 {
+        client.add_medical_record(
+            &patient,
+            &doctor,
+            &Bytes::from_array(&env, &[i, i, i]),
+            &String::from_str(&env, "Record"),
+        );
+    }
+
+    let token = soroban_sdk::token::TokenClient::new(&env, &token_id);
+    assert_eq!(token.balance(&treasury), 300);
+    assert_eq!(token.balance(&doctor), 9_700);
+}
+
+#[test]
+#[should_panic(expected = "Fee cannot be negative")]
+fn test_set_negative_fee_panics() {
+    let env = Env::default();
+    let (client, _admin, _treasury, _token_id, _doctor, _patient, _v1) =
+        setup_with_fee(&env);
+    client.set_record_fee(&-1);
+}
+
+#[test]
+fn test_fee_can_be_reset_to_zero() {
+    let env = Env::default();
+    let (client, _admin, treasury, token_id, doctor, patient, _v1) =
+        setup_with_fee(&env);
+
+    client.set_record_fee(&300);
+    client.set_record_fee(&0);
+
+    client.add_medical_record(
+        &patient,
+        &doctor,
+        &Bytes::from_array(&env, &[7, 8, 9]),
+        &String::from_str(&env, "Free after reset"),
+    );
+
+    let token = soroban_sdk::token::TokenClient::new(&env, &token_id);
+    assert_eq!(token.balance(&treasury), 0);
 }

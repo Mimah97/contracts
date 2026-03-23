@@ -1,8 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN, Env, Map, String,
-    Vec,
+    contract, contractimpl, contracttype, symbol_short, token, Address, Bytes, BytesN, Env, Map,
+    String, Vec,
 };
 
 /// --------------------
@@ -56,6 +56,9 @@ pub enum DataKey {
     PatientList,
     DoctorList,
     LastSnapshotLedger,
+    RecordFee,
+    Treasury,
+    FeeToken,
 }
 
 #[contracttype]
@@ -88,11 +91,34 @@ impl MedicalRegistry {
     //                    ADMIN / CONSENT
     // =====================================================
 
-    pub fn initialize(env: Env, admin: Address) {
+    pub fn initialize(env: Env, admin: Address, treasury: Address, fee_token: Address) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic!("Already initialized");
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::Treasury, &treasury);
+        env.storage().instance().set(&DataKey::FeeToken, &fee_token);
+        env.storage().instance().set(&DataKey::RecordFee, &0i128);
+    }
+
+    pub fn set_record_fee(env: Env, amount: i128) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        admin.require_auth();
+        if amount < 0 {
+            panic!("Fee cannot be negative");
+        }
+        env.storage().instance().set(&DataKey::RecordFee, &amount);
+    }
+
+    pub fn get_record_fee(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::RecordFee)
+            .unwrap_or(0)
     }
 
     pub fn publish_consent_version(env: Env, version_hash: BytesN<32>) {
@@ -385,6 +411,30 @@ impl MedicalRegistry {
         description: String,
     ) {
         doctor.require_auth();
+
+        // Collect record fee if set
+        let fee: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RecordFee)
+            .unwrap_or(0);
+        if fee > 0 {
+            let token_id: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::FeeToken)
+                .expect("Fee token not configured");
+            let treasury: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::Treasury)
+                .expect("Treasury not configured");
+            token::TokenClient::new(&env, &token_id).transfer(
+                &doctor,
+                &treasury,
+                &fee,
+            );
+        }
 
         // Check consent
         if Self::get_consent_status(env.clone(), patient.clone()) != ConsentStatus::Acknowledged {
