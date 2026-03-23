@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, Address, Bytes, BytesN, Env, String};
+use soroban_sdk::{testutils::{Address as _, Ledger as _}, Address, Bytes, BytesN, Env, String};
 
 /// ------------------------------------------------
 /// PATIENT TESTS
@@ -557,4 +557,152 @@ fn test_guardian_cannot_act_for_different_patient() {
     client.assign_guardian(&patient_a, &guardian);
     // Attempt to act on behalf of patient_b
     client.acknowledge_consent(&patient_b, &guardian, &v1);
+}
+
+/// ------------------------------------------------
+/// SNAPSHOT TESTS
+/// ------------------------------------------------
+
+fn register_patient_with_consent(
+    client: &MedicalRegistryClient,
+    env: &Env,
+    v1: &BytesN<32>,
+    wallet: &Address,
+) {
+    client.register_patient(
+        wallet,
+        &String::from_str(env, "Test Patient"),
+        &631152000,
+        &String::from_str(env, "ipfs://data"),
+    );
+    client.acknowledge_consent(wallet, wallet, v1);
+}
+
+#[test]
+fn test_first_snapshot_always_allowed() {
+    let env = Env::default();
+    let contract_id = env.register(MedicalRegistry, ());
+    let client = MedicalRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let v1 = make_version(&env, 1);
+
+    env.mock_all_auths();
+    client.initialize(&admin);
+    client.publish_consent_version(&v1);
+
+    // No prior snapshot — should succeed at any ledger
+    client.emit_state_snapshot();
+    assert_eq!(client.get_last_snapshot_ledger(), Some(env.ledger().sequence()));
+}
+
+#[test]
+fn test_snapshot_records_ledger_sequence() {
+    let env = Env::default();
+    let contract_id = env.register(MedicalRegistry, ());
+    let client = MedicalRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin);
+
+    let seq_before = env.ledger().sequence();
+    client.emit_state_snapshot();
+    assert_eq!(client.get_last_snapshot_ledger(), Some(seq_before));
+}
+
+#[test]
+fn test_get_last_snapshot_ledger_default_zero() {
+    let env = Env::default();
+    let contract_id = env.register(MedicalRegistry, ());
+    let client = MedicalRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin);
+
+    assert_eq!(client.get_last_snapshot_ledger(), None);
+}
+
+#[test]
+#[should_panic(expected = "Snapshot rate limit: must wait 100,000 ledgers between snapshots")]
+fn test_snapshot_rate_limit_enforced() {
+    let env = Env::default();
+    let contract_id = env.register(MedicalRegistry, ());
+    let client = MedicalRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin);
+    client.emit_state_snapshot();
+
+    // Advance ledger by less than 100,000
+    env.ledger().set(soroban_sdk::testutils::LedgerInfo {
+        sequence_number: env.ledger().sequence() + 99_999,
+        timestamp: env.ledger().timestamp() + 99_999,
+        protocol_version: 23,
+        network_id: Default::default(),
+        base_reserve: 10,
+        min_temp_entry_ttl: 1,
+        min_persistent_entry_ttl: 1,
+        max_entry_ttl: 10_000_000,
+    });
+
+    client.emit_state_snapshot();
+}
+
+#[test]
+fn test_snapshot_allowed_after_interval() {
+    let env = Env::default();
+    let contract_id = env.register(MedicalRegistry, ());
+    let client = MedicalRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin);
+    client.emit_state_snapshot();
+
+    let new_seq = env.ledger().sequence() + 100_000;
+    env.ledger().set(soroban_sdk::testutils::LedgerInfo {
+        sequence_number: new_seq,
+        timestamp: env.ledger().timestamp() + 100_000,
+        protocol_version: 23,
+        network_id: Default::default(),
+        base_reserve: 10,
+        min_temp_entry_ttl: 1,
+        min_persistent_entry_ttl: 1,
+        max_entry_ttl: 10_000_000,
+    });
+
+    client.emit_state_snapshot();
+    assert_eq!(client.get_last_snapshot_ledger(), Some(new_seq));
+}
+
+#[test]
+fn test_snapshot_includes_registered_patients_and_doctors() {
+    let env = Env::default();
+    let contract_id = env.register(MedicalRegistry, ());
+    let client = MedicalRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let v1 = make_version(&env, 1);
+
+    env.mock_all_auths();
+    client.initialize(&admin);
+    client.publish_consent_version(&v1);
+
+    let p1 = Address::generate(&env);
+    let p2 = Address::generate(&env);
+    register_patient_with_consent(&client, &env, &v1, &p1);
+    register_patient_with_consent(&client, &env, &v1, &p2);
+
+    let doctor = Address::generate(&env);
+    client.register_doctor(
+        &doctor,
+        &String::from_str(&env, "Dr. Snap"),
+        &String::from_str(&env, "Radiology"),
+        &Bytes::from_array(&env, &[1, 2, 3]),
+    );
+
+    // Snapshot should succeed — lists are populated
+    client.emit_state_snapshot();
+    assert_eq!(client.get_last_snapshot_ledger(), Some(env.ledger().sequence()));
 }

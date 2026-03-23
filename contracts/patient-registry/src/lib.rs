@@ -53,6 +53,9 @@ pub enum DataKey {
     ConsentVersion,
     ConsentAck(Address),
     Guardian(Address),
+    PatientList,
+    DoctorList,
+    LastSnapshotLedger,
 }
 
 #[contracttype]
@@ -208,6 +211,14 @@ impl MedicalRegistry {
         };
         env.storage().persistent().set(&key, &patient);
 
+        let mut pat_list: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PatientList)
+            .unwrap_or(Vec::new(&env));
+        pat_list.push_back(wallet.clone());
+        env.storage().persistent().set(&DataKey::PatientList, &pat_list);
+
         env.events()
             .publish((symbol_short!("reg_pat"), wallet), symbol_short!("success"));
     }
@@ -268,6 +279,14 @@ impl MedicalRegistry {
         };
 
         env.storage().persistent().set(&key, &doctor);
+
+        let mut doc_list: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DoctorList)
+            .unwrap_or(Vec::new(&env));
+        doc_list.push_back(wallet.clone());
+        env.storage().persistent().set(&DataKey::DoctorList, &doc_list);
 
         env.events()
             .publish((symbol_short!("reg_doc"), wallet), symbol_short!("success"));
@@ -400,6 +419,98 @@ impl MedicalRegistry {
 
         records.push_back(record);
         env.storage().persistent().set(&records_key, &records);
+    }
+
+    // =====================================================
+    //                  STATE SNAPSHOT
+    // =====================================================
+
+    /// Emit a full-state snapshot as events for off-chain reconstruction.
+    ///
+    /// # Rate limit
+    /// Once every 100,000 ledgers (~5-6 days on Stellar mainnet).
+    ///
+    /// # Emitted events
+    /// 1. `snap_meta` — topics: `("snap_meta", ledger_sequence)`,
+    ///    data: `(patient_count, doctor_count, consent_version)`
+    ///    Verify completeness of the other two events against these counts.
+    ///
+    /// 2. `snap_pats` — topics: `("snap_pats", ledger_sequence)`,
+    ///    data: `Vec<Address>` of all registered patient addresses.
+    ///
+    /// 3. `snap_docs` — topics: `("snap_docs", ledger_sequence)`,
+    ///    data: `Vec<Address>` of all registered doctor addresses.
+    ///
+    /// # Off-chain reconstruction steps
+    /// 1. Subscribe to the Horizon/RPC event stream filtered by this contract ID.
+    /// 2. On `snap_meta`, record `ledger_sequence` and expected counts.
+    /// 3. Collect `snap_pats` and `snap_docs` at the same ledger sequence.
+    /// 4. Assert address list lengths match the counts in `snap_meta`.
+    /// 5. For each address call `get_patient` / `get_doctor` via RPC at that
+    ///    exact ledger (requires an archive node: `--ledger <seq>`).
+    /// 6. Persist the reconstructed structs to your off-chain store.
+    pub fn emit_state_snapshot(env: Env) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        admin.require_auth();
+
+        const SNAPSHOT_INTERVAL: u32 = 100_000;
+        let current_ledger = env.ledger().sequence();
+        let last: Option<u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::LastSnapshotLedger);
+
+        if let Some(last_ledger) = last {
+            if current_ledger.saturating_sub(last_ledger) < SNAPSHOT_INTERVAL {
+                panic!("Snapshot rate limit: must wait 100,000 ledgers between snapshots");
+            }
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::LastSnapshotLedger, &current_ledger);
+
+        let patients: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PatientList)
+            .unwrap_or(Vec::new(&env));
+        let doctors: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DoctorList)
+            .unwrap_or(Vec::new(&env));
+        let consent_version: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ConsentVersion)
+            .unwrap_or(BytesN::from_array(&env, &[0u8; 32]));
+
+        let patient_count = patients.len();
+        let doctor_count = doctors.len();
+
+        env.events().publish(
+            (symbol_short!("snap_meta"), current_ledger),
+            (patient_count, doctor_count, consent_version),
+        );
+        env.events().publish(
+            (symbol_short!("snap_pats"), current_ledger),
+            patients,
+        );
+        env.events().publish(
+            (symbol_short!("snap_docs"), current_ledger),
+            doctors,
+        );
+    }
+
+    pub fn get_last_snapshot_ledger(env: Env) -> Option<u32> {
+        env.storage()
+            .instance()
+            .get(&DataKey::LastSnapshotLedger)
     }
 
     pub fn get_medical_records(env: Env, patient: Address) -> Vec<MedicalRecord> {
