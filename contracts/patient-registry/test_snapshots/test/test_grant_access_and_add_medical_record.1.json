@@ -96,6 +96,9 @@
                 },
                 {
                   "string": "Blood test results"
+                },
+                {
+                  "symbol": "LAB"
                 }
               ]
             }
@@ -315,6 +318,14 @@
                           },
                           "val": {
                             "bytes": "010203"
+                          }
+                        },
+                        {
+                          "key": {
+                            "symbol": "record_type"
+                          },
+                          "val": {
+                            "symbol": "LAB"
                           }
                         },
                         {
