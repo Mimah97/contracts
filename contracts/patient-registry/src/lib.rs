@@ -22,6 +22,16 @@ pub const LEDGER_BUMP_AMOUNT: u32 = 535_680;
 pub const LEDGER_THRESHOLD: u32 = 518_400;
 
 /// --------------------
+/// Patient Status
+/// --------------------
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PatientStatus {
+    Active,
+    Deregistered,
+}
+
+/// --------------------
 /// Patient Structures
 /// --------------------
 #[contracttype]
@@ -30,6 +40,7 @@ pub struct PatientData {
     pub name: String,
     pub dob: u64,
     pub metadata: String, // IPFS / encrypted medical refs
+    pub status: PatientStatus,
 }
 
 /// --------------------
@@ -81,6 +92,8 @@ pub enum DataKey {
     ShareNonce(Address),
     /// Share link data keyed by token hash.
     ShareLink(BytesN<32>),
+    /// Marks a patient as deregistered (value: timestamp of deregistration).
+    Deregistered(Address),
 }
 
 /// --------------------
@@ -123,6 +136,7 @@ pub struct RegulatoryHold {
 pub enum ContractError {
     InvalidCID = 1,
     InvalidToken = 2,
+    NotAuthorized = 3,
     InvalidDID = 2,
     InvalidScore = 3,
     ContractFrozen = 2,
@@ -374,6 +388,7 @@ impl MedicalRegistry {
             name,
             dob,
             metadata,
+            status: PatientStatus::Active,
         };
         env.storage().persistent().set(&key, &patient);
         let total_patients: u64 = env
@@ -429,6 +444,46 @@ impl MedicalRegistry {
     pub fn is_patient_registered(env: Env, wallet: Address) -> bool {
         let key = DataKey::Patient(wallet);
         env.storage().persistent().has(&key)
+    }
+
+    /// Deregister the calling patient.
+    ///
+    /// - Sets `PatientData.status` to `Deregistered`.
+    /// - Clears all access grants so former grantees can no longer read records.
+    /// - Records are retained (not deleted) and remain readable by the admin.
+    /// - Emits a `pat_dreg` audit event.
+    pub fn deregister_patient(env: Env, patient: Address) {
+        patient.require_auth();
+
+        let key = DataKey::Patient(patient.clone());
+        let mut data: PatientData = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("Patient not found");
+
+        if data.status == PatientStatus::Deregistered {
+            panic!("Patient already deregistered");
+        }
+
+        data.status = PatientStatus::Deregistered;
+        env.storage().persistent().set(&key, &data);
+
+        // Stamp deregistration time for audit trail.
+        env.storage().persistent().set(
+            &DataKey::Deregistered(patient.clone()),
+            &env.ledger().timestamp(),
+        );
+
+        // Revoke all access grants.
+        env.storage()
+            .persistent()
+            .remove(&DataKey::AuthorizedDoctors(patient.clone()));
+
+        env.events().publish(
+            (symbol_short!("pat_dreg"), patient),
+            env.ledger().timestamp(),
+        );
     }
 
     pub fn get_total_patients(env: Env) -> u64 {
@@ -791,24 +846,40 @@ impl MedicalRegistry {
         Ok(())
     }
 
-    pub fn get_medical_records(env: Env, patient: Address) -> Vec<MedicalRecord> {
+    pub fn get_medical_records(env: Env, patient: Address, caller: Address) -> Vec<MedicalRecord> {
+        // If the patient is deregistered, only the admin may read records.
+        let patient_key = DataKey::Patient(patient.clone());
+        if let Some(data) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, PatientData>(&patient_key)
+        {
+            if data.status == PatientStatus::Deregistered {
+                let admin: Address = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::Admin)
+                    .expect("Not initialized");
+                if caller != admin {
+                    panic!("Records only accessible by admin after deregistration");
+                }
+            }
+        }
+
         let key = DataKey::MedicalRecords(patient.clone());
 
         if env.storage().persistent().has(&key) {
-            env.storage().persistent().extend_ttl(
-                &key,
-                LEDGER_THRESHOLD,
-                LEDGER_BUMP_AMOUNT,
-            );
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, LEDGER_THRESHOLD, LEDGER_BUMP_AMOUNT);
         }
 
+        // Also bump the patient record itself
         let patient_key = DataKey::Patient(patient.clone());
         if env.storage().persistent().has(&patient_key) {
-            env.storage().persistent().extend_ttl(
-                &patient_key,
-                LEDGER_THRESHOLD,
-                LEDGER_BUMP_AMOUNT,
-            );
+            env.storage()
+                .persistent()
+                .extend_ttl(&patient_key, LEDGER_THRESHOLD, LEDGER_BUMP_AMOUNT);
         }
 
         env.storage()
