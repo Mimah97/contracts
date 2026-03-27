@@ -2,9 +2,11 @@
 #![allow(deprecated)]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Bytes,
-    BytesN, Env, Map, String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
+    Address, Bytes, BytesN, Env, Map, String, Symbol, Vec,
 };
+
+pub const NEW_RECORD_TOPIC: &str = "new_record";
 
 // =====================================================
 //                    TTL CONSTANTS
@@ -72,11 +74,14 @@ pub enum DataKey {
     Treasury,
     FeeToken,
     TotalPatients,
+    RecordCounter(Address),
+    Frozen,
 }
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MedicalRecord {
+    pub record_id: u64,
     pub doctor: Address,
     pub record_hash: Bytes,
     pub description: String,
@@ -98,6 +103,7 @@ pub struct RegulatoryHold {
 #[repr(u32)]
 pub enum ContractError {
     InvalidCID = 1,
+    ContractFrozen = 2,
 }
 
 pub fn validate_cid(cid: &Bytes) -> Result<(), ContractError> {
@@ -187,10 +193,36 @@ impl MedicalRegistry {
     }
 
     // =====================================================
+    //                  CONTRACT FREEZE
+    // =====================================================
+
+    pub fn freeze_contract(env: Env) {
+        Self::require_admin(&env);
+        env.storage().instance().set(&DataKey::Frozen, &true);
+        env.events()
+            .publish((symbol_short!("freeze"),), symbol_short!("frozen"));
+    }
+
+    pub fn unfreeze_contract(env: Env) {
+        Self::require_admin(&env);
+        env.storage().instance().set(&DataKey::Frozen, &false);
+        env.events()
+            .publish((symbol_short!("unfreeze"),), symbol_short!("active"));
+    }
+
+    pub fn is_frozen(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Frozen)
+            .unwrap_or(false)
+    }
+
+    // =====================================================
     //                    ADMIN / CONSENT
     // =====================================================
 
     pub fn set_record_fee(env: Env, amount: i128) {
+        Self::require_not_frozen(&env);
         let admin: Address = env
             .storage()
             .instance()
@@ -211,6 +243,7 @@ impl MedicalRegistry {
     }
 
     pub fn publish_consent_version(env: Env, version_hash: BytesN<32>) {
+        Self::require_not_frozen(&env);
         let admin: Address = env
             .storage()
             .instance()
@@ -225,6 +258,7 @@ impl MedicalRegistry {
     }
 
     pub fn assign_guardian(env: Env, patient: Address, guardian: Address) {
+        Self::require_not_frozen(&env);
         let admin: Address = env
             .storage()
             .instance()
@@ -239,6 +273,7 @@ impl MedicalRegistry {
     }
 
     pub fn revoke_guardian(env: Env, patient: Address) {
+        Self::require_not_frozen(&env);
         let admin: Address = env
             .storage()
             .instance()
@@ -264,6 +299,7 @@ impl MedicalRegistry {
         caller: Address,
         version_hash: BytesN<32>,
     ) {
+        Self::require_not_frozen(&env);
         require_patient_or_guardian(&env, &patient, &caller);
         let current: BytesN<32> = env
             .storage()
@@ -305,6 +341,7 @@ impl MedicalRegistry {
     // =====================================================
 
     pub fn register_patient(env: Env, wallet: Address, name: String, dob: u64, metadata: String) {
+        Self::require_not_frozen(&env);
         wallet.require_auth();
 
         let key = DataKey::Patient(wallet.clone());
@@ -342,6 +379,7 @@ impl MedicalRegistry {
     }
 
     pub fn update_patient(env: Env, wallet: Address, caller: Address, metadata: String) {
+        Self::require_not_frozen(&env);
         require_patient_or_guardian(&env, &wallet, &caller);
         Self::require_not_on_hold(&env, &wallet);
 
@@ -377,9 +415,12 @@ impl MedicalRegistry {
             .instance()
             .get(&DataKey::TotalPatients)
             .unwrap_or(0)
+    }
+
     /// Extend the TTL of all persistent storage entries for a patient.
     /// Callable by the patient themselves or the contract admin.
     pub fn extend_patient_ttl(env: Env, patient: Address) {
+        Self::require_not_frozen(&env);
         // Authorize: patient or admin
         let admin: Address = env
             .storage()
@@ -442,6 +483,7 @@ impl MedicalRegistry {
     }
 
     pub fn place_hold(env: Env, patient: Address, reason_hash: BytesN<32>, expires_at: u64) {
+        Self::require_not_frozen(&env);
         Self::require_admin(&env);
         Self::require_patient_exists(&env, &patient);
 
@@ -470,6 +512,7 @@ impl MedicalRegistry {
     }
 
     pub fn lift_hold(env: Env, patient: Address) {
+        Self::require_not_frozen(&env);
         Self::require_admin(&env);
 
         let hold = Self::active_hold(&env, &patient).expect("No active regulatory hold");
@@ -504,6 +547,7 @@ impl MedicalRegistry {
         specialization: String,
         certificate_hash: Bytes,
     ) {
+        Self::require_not_frozen(&env);
         wallet.require_auth();
 
         let key = DataKey::Doctor(wallet.clone());
@@ -535,6 +579,7 @@ impl MedicalRegistry {
     }
 
     pub fn verify_doctor(env: Env, wallet: Address, institution_wallet: Address) {
+        Self::require_not_frozen(&env);
         institution_wallet.require_auth();
 
         let inst_key = DataKey::Institution(institution_wallet);
@@ -571,6 +616,7 @@ impl MedicalRegistry {
     // =====================================================
 
     pub fn register_institution(env: Env, institution_wallet: Address) {
+        Self::require_not_frozen(&env);
         institution_wallet.require_auth();
         let key = DataKey::Institution(institution_wallet);
         env.storage().persistent().set(&key, &true);
@@ -581,6 +627,7 @@ impl MedicalRegistry {
     // =====================================================
 
     pub fn grant_access(env: Env, patient: Address, caller: Address, doctor: Address) {
+        Self::require_not_frozen(&env);
         require_patient_or_guardian(&env, &patient, &caller);
         Self::require_not_on_hold(&env, &patient);
 
@@ -596,6 +643,7 @@ impl MedicalRegistry {
     }
 
     pub fn revoke_access(env: Env, patient: Address, caller: Address, doctor: Address) {
+        Self::require_not_frozen(&env);
         require_patient_or_guardian(&env, &patient, &caller);
         Self::require_not_on_hold(&env, &patient);
 
@@ -633,6 +681,7 @@ impl MedicalRegistry {
         description: String,
         record_type: Symbol,
     ) -> Result<(), ContractError> {
+        Self::require_not_frozen(&env);
         doctor.require_auth();
         validate_cid(&record_hash)?;
 
@@ -673,12 +722,24 @@ impl MedicalRegistry {
             panic!("Doctor not authorized");
         }
 
+        let counter_key = DataKey::RecordCounter(patient.clone());
+        let record_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&counter_key)
+            .unwrap_or(0u64)
+            + 1;
+        env.storage().persistent().set(&counter_key, &record_id);
+
+        let timestamp = env.ledger().timestamp();
+
         let record = MedicalRecord {
-            doctor,
+            record_id,
+            doctor: doctor.clone(),
             record_hash,
             description,
-            timestamp: env.ledger().timestamp(),
-            record_type,
+            timestamp,
+            record_type: record_type.clone(),
         };
 
         let records_key = DataKey::MedicalRecords(patient.clone());
@@ -691,15 +752,27 @@ impl MedicalRegistry {
         records.push_back(record);
         env.storage().persistent().set(&records_key, &records);
 
-        Ok(())
         // Extend TTL for all patient persistent entries after writing a record
         Self::bump_patient_keys(&env, &patient);
+        // Emit provider-to-patient record notification
+        env.events().publish(
+            (
+                Symbol::new(&env, NEW_RECORD_TOPIC),
+                patient.clone(),
+                doctor,
+            ),
+            (record_id, record_type, timestamp),
+        );
+
+        // Extend TTL for all patient persistent entries after writing a record
+        Self::bump_patient_keys(&env, &patient);
+
+        Ok(())
     }
 
     pub fn get_medical_records(env: Env, patient: Address) -> Vec<MedicalRecord> {
         let key = DataKey::MedicalRecords(patient.clone());
 
-        // Extend TTL on read to keep active records accessible
         if env.storage().persistent().has(&key) {
             env.storage().persistent().extend_ttl(
                 &key,
@@ -708,7 +781,6 @@ impl MedicalRegistry {
             );
         }
 
-        // Also bump the patient record itself
         let patient_key = DataKey::Patient(patient.clone());
         if env.storage().persistent().has(&patient_key) {
             env.storage().persistent().extend_ttl(
@@ -718,14 +790,6 @@ impl MedicalRegistry {
             );
         }
 
-        env.storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(Vec::new(&env))
-    }
-
-    pub fn get_medical_records(env: Env, patient: Address) -> Vec<MedicalRecord> {
-        let key = DataKey::MedicalRecords(patient);
         env.storage()
             .persistent()
             .get(&key)
@@ -759,6 +823,44 @@ impl MedicalRegistry {
         filtered
     }
 
+    /// Returns records by positional IDs for a patient.
+    ///
+    /// `ids` can contain up to 10 entries. Missing IDs are either skipped
+    /// (`strict_not_found = false`) or cause a panic (`strict_not_found = true`).
+    pub fn get_records_by_ids(
+        env: Env,
+        patient: Address,
+        caller: Address,
+        ids: Vec<u32>,
+        strict_not_found: bool,
+    ) -> Vec<MedicalRecord> {
+        if ids.len() > 10 {
+            panic!("Too many record IDs; maximum is 10");
+        }
+        require_record_access(&env, &patient, &caller);
+
+        let key = DataKey::MedicalRecords(patient.clone());
+        let records: Vec<MedicalRecord> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+
+        let mut selected = Vec::new(&env);
+        for id in ids.iter() {
+            match records.get(id) {
+                Some(record) => selected.push_back(record),
+                None => {
+                    if strict_not_found {
+                        panic!("Record ID not found");
+                    }
+                }
+            }
+        }
+
+        selected
+    }
+
     // =====================================================
     //                  STATE SNAPSHOT
     // =====================================================
@@ -778,6 +880,7 @@ impl MedicalRegistry {
     /// 3. `snap_docs` — topics: `("snap_docs", ledger_sequence)`,
     ///    data: `Vec<Address>` of all registered doctor addresses.
     pub fn emit_state_snapshot(env: Env) {
+        Self::require_not_frozen(&env);
         let admin: Address = env
             .storage()
             .instance()
@@ -835,6 +938,17 @@ impl MedicalRegistry {
     // =====================================================
     //                  PRIVATE HELPERS
     // =====================================================
+
+    fn require_not_frozen(env: &Env) {
+        let frozen: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Frozen)
+            .unwrap_or(false);
+        if frozen {
+            panic_with_error!(env, ContractError::ContractFrozen);
+        }
+    }
 
     fn require_admin(env: &Env) {
         let admin: Address = env
