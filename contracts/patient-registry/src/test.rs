@@ -805,9 +805,9 @@ fn test_duplicate_active_hold_is_rejected() {
     assert!(result.is_err());
 }
 
-/// ------------------------------------------------
-/// CONSENT TESTS
-/// ------------------------------------------------
+// ------------------------------------------------
+// CONSENT TESTS
+// ------------------------------------------------
 
 fn make_version(env: &Env, seed: u8) -> BytesN<32> {
     BytesN::from_array(env, &[seed; 32])
@@ -1023,9 +1023,9 @@ fn test_add_record_blocked_after_new_version() {
     );
 }
 
-/// ------------------------------------------------
-/// GUARDIAN TESTS
-/// ------------------------------------------------
+// ------------------------------------------------
+// GUARDIAN TESTS
+// ------------------------------------------------
 
 fn setup_with_consent(env: &Env) -> (MedicalRegistryClient<'_>, Address) {
     let contract_id = env.register(MedicalRegistry, ());
@@ -1187,9 +1187,9 @@ fn test_guardian_cannot_act_for_different_patient() {
     client.acknowledge_consent(&patient_b, &guardian, &v1);
 }
 
-/// ------------------------------------------------
-/// SNAPSHOT TESTS
-/// ------------------------------------------------
+// ------------------------------------------------
+// SNAPSHOT TESTS
+// ------------------------------------------------
 
 fn register_patient_with_consent(
     client: &MedicalRegistryClient,
@@ -1350,9 +1350,9 @@ fn test_snapshot_includes_registered_patients_and_doctors() {
     );
 }
 
-/// ------------------------------------------------
-/// FEE TESTS
-/// ------------------------------------------------
+// ------------------------------------------------
+// FEE TESTS
+// ------------------------------------------------
 
 fn setup_with_fee(
     env: &Env,
@@ -1493,6 +1493,9 @@ fn test_fee_can_be_reset_to_zero() {
     assert_eq!(token.balance(&treasury), 0);
 }
 
+// ------------------------------------------------
+// GET_RECORDS_BY_TYPE TESTS
+// ------------------------------------------------
 /// ------------------------------------------------
 /// TTL EXTENSION TESTS
 /// ------------------------------------------------
@@ -1581,6 +1584,14 @@ fn setup_for_filter(env: &Env) -> (MedicalRegistryClient<'_>, Address, Address) 
     (client, patient, doctor)
 }
 
+/// GET_RECORDS_BY_TYPE TESTS
+/// ------------------------------------------------
+
+fn setup_for_filter(env: &Env) -> (MedicalRegistryClient<'_>, Address, Address) {
+    let (client, _admin, patient, doctor, _v1) = setup_for_ttl(env);
+    (client, patient, doctor)
+}
+
 /// After `add_medical_record`, TTL on the MedicalRecords key must not be zero —
 /// i.e., `extend_ttl` was called and the entry lives beyond the current ledger.
 #[test]
@@ -1589,6 +1600,21 @@ fn test_add_record_extends_patient_ttl() {
     env.ledger().set(make_ledger_info(100, 1_000_000));
 
     let (client, _admin, patient, doctor, _v1) = setup_for_ttl(&env);
+    client.add_medical_record(
+        &patient,
+        &doctor,
+        &make_cid_v1(&env, 10),
+        &String::from_str(&env, "Initial checkup"),
+        &Symbol::new(&env, "VISIT"),
+    );
+    let records = client.get_medical_records(&patient);
+    assert_eq!(records.len(), 1);
+}
+
+#[test]
+fn test_get_records_by_type_returns_matching_records() {
+    let env = Env::default();
+    let (client, patient, doctor) = setup_for_filter(&env);
 
     client.add_medical_record(
         &patient,
@@ -1596,6 +1622,7 @@ fn test_add_record_extends_patient_ttl() {
         &make_cid_v1(&env, 10),
         &String::from_str(&env, "Checkup"),
         &Symbol::new(&env, "LAB"),
+        &Symbol::new(&env, "VISIT"),
     );
 
     // Verify the records are still accessible after adding
@@ -1608,6 +1635,7 @@ fn test_get_records_by_type_returns_matching_records() {
     let env = Env::default();
     let (client, patient, doctor) = setup_for_filter(&env);
 
+    let (client, _admin, patient, doctor, _v1) = setup_for_ttl(&env);
     client.add_medical_record(
         &patient,
         &doctor,
@@ -1665,6 +1693,7 @@ fn test_get_records_extends_ttl() {
         &make_cid_v1(&env, 13),
         &String::from_str(&env, "Initial record"),
         &Symbol::new(&env, "LAB"),
+        &Symbol::new(&env, "VISIT"),
     );
 
     // Call get_medical_records — internally bumps TTL
@@ -2108,3 +2137,216 @@ fn test_new_record_event_not_emitted_on_unauthorized_add() {
 }
 
 
+// =====================================================
+//                  CONTRACT FREEZE TESTS
+// =====================================================
+
+fn setup_initialized(env: &Env) -> (soroban_sdk::Address, soroban_sdk::Address) {
+    use soroban_sdk::Address;
+    let contract_id = env.register(MedicalRegistry, ());
+    let admin = Address::generate(env);
+    let treasury = Address::generate(env);
+    let fee_token = Address::generate(env);
+    let client = MedicalRegistryClient::new(env, &contract_id);
+    env.mock_all_auths();
+    client.initialize(&admin, &treasury, &fee_token);
+    (contract_id, admin)
+}
+
+#[test]
+fn test_is_frozen_defaults_to_false() {
+    let env = Env::default();
+    let (contract_id, _) = setup_initialized(&env);
+    let client = MedicalRegistryClient::new(&env, &contract_id);
+
+    assert!(!client.is_frozen());
+}
+
+#[test]
+fn test_freeze_and_unfreeze() {
+    let env = Env::default();
+    let (contract_id, _) = setup_initialized(&env);
+    let client = MedicalRegistryClient::new(&env, &contract_id);
+
+    assert!(!client.is_frozen());
+
+    client.freeze_contract();
+    assert!(client.is_frozen());
+
+    client.unfreeze_contract();
+    assert!(!client.is_frozen());
+}
+
+#[test]
+fn test_freeze_blocks_register_patient() {
+    let env = Env::default();
+    let (contract_id, _) = setup_initialized(&env);
+    let client = MedicalRegistryClient::new(&env, &contract_id);
+
+    client.freeze_contract();
+
+    let patient = Address::generate(&env);
+    let result = client.try_register_patient(
+        &patient,
+        &String::from_str(&env, "Alice"),
+        &631152000,
+        &String::from_str(&env, "ipfs://data"),
+    );
+
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        ContractError::ContractFrozen.into()
+    );
+}
+
+#[test]
+fn test_freeze_blocks_update_patient() {
+    let env = Env::default();
+    let (contract_id, _) = setup_initialized(&env);
+    let client = MedicalRegistryClient::new(&env, &contract_id);
+
+    let patient = Address::generate(&env);
+    client.register_patient(
+        &patient,
+        &String::from_str(&env, "Bob"),
+        &631152000,
+        &String::from_str(&env, "ipfs://original"),
+    );
+
+    client.freeze_contract();
+
+    let result = client.try_update_patient(
+        &patient,
+        &patient,
+        &String::from_str(&env, "ipfs://updated"),
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        ContractError::ContractFrozen.into()
+    );
+}
+
+#[test]
+fn test_freeze_blocks_register_doctor() {
+    let env = Env::default();
+    let (contract_id, _) = setup_initialized(&env);
+    let client = MedicalRegistryClient::new(&env, &contract_id);
+
+    client.freeze_contract();
+
+    let doctor = Address::generate(&env);
+    let result = client.try_register_doctor(
+        &doctor,
+        &String::from_str(&env, "Dr. Smith"),
+        &String::from_str(&env, "Surgery"),
+        &Bytes::from_array(&env, &[1, 2, 3, 4]),
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        ContractError::ContractFrozen.into()
+    );
+}
+
+#[test]
+fn test_reads_allowed_during_freeze() {
+    let env = Env::default();
+    let (contract_id, _) = setup_initialized(&env);
+    let client = MedicalRegistryClient::new(&env, &contract_id);
+
+    let patient = Address::generate(&env);
+    client.register_patient(
+        &patient,
+        &String::from_str(&env, "Carol"),
+        &631152000,
+        &String::from_str(&env, "ipfs://data"),
+    );
+
+    client.freeze_contract();
+
+    // Reads must still succeed during a freeze
+    assert!(client.is_frozen());
+    assert!(client.is_patient_registered(&patient));
+    let data = client.get_patient(&patient);
+    assert_eq!(data.name, String::from_str(&env, "Carol"));
+    assert_eq!(client.get_total_patients(), 1);
+}
+
+#[test]
+fn test_unfreeze_restores_write_access() {
+    let env = Env::default();
+    let (contract_id, _) = setup_initialized(&env);
+    let client = MedicalRegistryClient::new(&env, &contract_id);
+
+    client.freeze_contract();
+    client.unfreeze_contract();
+
+    let patient = Address::generate(&env);
+    // Should succeed after unfreeze
+    client.register_patient(
+        &patient,
+        &String::from_str(&env, "Dave"),
+        &631152000,
+        &String::from_str(&env, "ipfs://data"),
+    );
+    assert!(client.is_patient_registered(&patient));
+}
+
+#[test]
+fn test_non_admin_cannot_freeze() {
+    let env = Env::default();
+    let contract_id = env.register(MedicalRegistry, ());
+    let client = MedicalRegistryClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fee_token = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin, &treasury, &fee_token);
+
+    // Only mock attacker auth (not admin)
+    let result = client
+        .mock_auths(&[MockAuth {
+            address: &attacker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "freeze_contract",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .try_freeze_contract();
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_non_admin_cannot_unfreeze() {
+    let env = Env::default();
+    let contract_id = env.register(MedicalRegistry, ());
+    let client = MedicalRegistryClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fee_token = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin, &treasury, &fee_token);
+    client.freeze_contract();
+
+    let result = client
+        .mock_auths(&[MockAuth {
+            address: &attacker,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "unfreeze_contract",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .try_unfreeze_contract();
+
+    assert!(result.is_err());
+}
