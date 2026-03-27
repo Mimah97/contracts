@@ -2,10 +2,8 @@
 #![allow(deprecated)]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token, xdr::ToXdr, Address,
-    Bytes, BytesN, Env, Map, String, Symbol, Vec,
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
-    Address, Bytes, BytesN, Env, Map, String, Symbol, Vec,
+    xdr::ToXdr, Address, Bytes, BytesN, Env, Map, String, Symbol, Vec,
 };
 
 pub mod validation;
@@ -94,6 +92,18 @@ pub enum DataKey {
     ShareLink(BytesN<32>),
     /// Marks a patient as deregistered (value: timestamp of deregistration).
     Deregistered(Address),
+    /// Contract-frozen flag (bool).
+    Frozen,
+    /// Global monotonic record counter (u64, instance storage).
+    RecordCounter,
+    /// Per-patient ordered list of record IDs (Vec<u64>).
+    PatientRecordIds(Address),
+    /// Individual record data keyed by global record ID.
+    MedicalRecord(u64),
+    /// Platform-wide secondary index: record_type → Vec<TypeIndexEntry>.
+    GlobalTypeIndex(Symbol),
+    /// Soft-delete tombstone for a record (value: timestamp of deletion).
+    DeletedRecord(u64),
 }
 
 /// --------------------
@@ -106,11 +116,15 @@ pub struct ShareLinkData {
     pub record_id: u64,
     pub uses_remaining: u32,
     pub expires_at: u64,
-    RecordCounter(Address),
-    Frozen,
-    RecordCounter,
-    PatientRecordIds(Address),
-    MedicalRecord(u64),
+}
+
+/// One entry in the platform-wide secondary index.
+/// Maps a `record_type` to the patient who owns it and the global record ID.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TypeIndexEntry {
+    pub patient: Address,
+    pub record_id: u64,
 }
 
 #[contracttype]
@@ -159,9 +173,10 @@ pub enum ContractError {
     InvalidCID = 1,
     InvalidToken = 2,
     NotAuthorized = 3,
-    InvalidDID = 2,
-    InvalidScore = 3,
-    ContractFrozen = 2,
+    InvalidDID = 4,
+    InvalidScore = 5,
+    ContractFrozen = 6,
+    NotFound = 7,
 }
 
 pub fn validate_cid(cid: &Bytes) -> Result<(), ContractError> {
@@ -824,7 +839,7 @@ impl MedicalRegistry {
 
         let timestamp = env.ledger().timestamp();
 
-        // Get next record ID
+        // Advance global monotonic record counter (instance storage).
         let mut record_id: u64 = env
             .storage()
             .instance()
@@ -843,7 +858,7 @@ impl MedicalRegistry {
 
         let record_data = RecordData {
             patient: patient.clone(),
-            record_type,
+            record_type: record_type.clone(),
             description,
             current_ipfs: record_hash.clone(),
             history: {
@@ -852,31 +867,13 @@ impl MedicalRegistry {
                 h
             },
             latest_version: 1u64,
-        let counter_key = DataKey::RecordCounter(patient.clone());
-        let record_id: u64 = env
-            .storage()
-            .persistent()
-            .get(&counter_key)
-            .unwrap_or(0u64)
-            + 1;
-        env.storage().persistent().set(&counter_key, &record_id);
-
-        let timestamp = env.ledger().timestamp();
-
-        let record = MedicalRecord {
-            record_id,
-            doctor: doctor.clone(),
-            record_hash,
-            description,
-            timestamp,
-            record_type: record_type.clone(),
         };
 
         env.storage()
             .persistent()
             .set(&DataKey::MedicalRecord(record_id), &record_data);
 
-        // Append to patient's record IDs
+        // Append to patient's ordered record-ID list.
         let ids_key = DataKey::PatientRecordIds(patient.clone());
         let mut ids: Vec<u64> = env
             .storage()
@@ -886,7 +883,27 @@ impl MedicalRegistry {
         ids.push_back(record_id);
         env.storage().persistent().set(&ids_key, &ids);
 
-        // TTL bump
+        // ── Secondary index update ────────────────────────────────────────────
+        // Atomically append (patient, record_id) to the global type index.
+        let idx_key = DataKey::GlobalTypeIndex(record_type.clone());
+        let mut type_index: Vec<TypeIndexEntry> = env
+            .storage()
+            .persistent()
+            .get(&idx_key)
+            .unwrap_or(Vec::new(&env));
+        type_index.push_back(TypeIndexEntry {
+            patient: patient.clone(),
+            record_id,
+        });
+        env.storage().persistent().set(&idx_key, &type_index);
+        env.storage().persistent().extend_ttl(
+            &idx_key,
+            LEDGER_THRESHOLD,
+            LEDGER_BUMP_AMOUNT,
+        );
+        // ─────────────────────────────────────────────────────────────────────
+
+        // TTL bumps for per-patient and per-record keys.
         Self::bump_patient_keys(&env, &patient);
         env.storage().persistent().extend_ttl(
             &DataKey::MedicalRecord(record_id),
@@ -896,22 +913,10 @@ impl MedicalRegistry {
         env.storage()
             .persistent()
             .extend_ttl(&ids_key, LEDGER_THRESHOLD, LEDGER_BUMP_AMOUNT);
-        // Emit provider-to-patient record notification
+
         env.events().publish(
-            (
-                Symbol::new(&env, NEW_RECORD_TOPIC),
-                patient.clone(),
-                doctor,
-            ),
+            (Symbol::new(&env, NEW_RECORD_TOPIC), patient.clone(), doctor.clone()),
             (record_id, record_type, timestamp),
-        );
-
-        // Extend TTL for all patient persistent entries after writing a record
-        Self::bump_patient_keys(&env, &patient);
-
-        env.events().publish(
-            (symbol_short!("record_added"), record_id),
-            (patient, doctor),
         );
 
         Ok(record_id)
@@ -1315,6 +1320,119 @@ impl MedicalRegistry {
         );
 
         Ok(record)
+    }
+
+    // =====================================================
+    //           GLOBAL SECONDARY INDEX (ADMIN)
+    // =====================================================
+
+    /// Soft-delete a record: marks it as deleted and atomically removes it from
+    /// the global type index.
+    ///
+    /// Callable by the owning patient, their guardian, or an authorized doctor.
+    /// After deletion the record data is retained for audit purposes but will no
+    /// longer appear in index queries.
+    pub fn soft_delete_record(env: Env, record_id: u64, caller: Address) -> Result<(), ContractError> {
+        Self::require_not_frozen(&env);
+
+        let record_key = DataKey::MedicalRecord(record_id);
+        let record_data: RecordData = env
+            .storage()
+            .persistent()
+            .get(&record_key)
+            .ok_or(ContractError::NotFound)?;
+
+        let patient = record_data.patient.clone();
+        Self::require_patient_exists(&env, &patient);
+        require_record_access(&env, &patient, &caller);
+
+        // Guard: already deleted?
+        if env.storage().persistent().has(&DataKey::DeletedRecord(record_id)) {
+            panic!("Record already deleted");
+        }
+
+        // Stamp the tombstone.
+        env.storage().persistent().set(
+            &DataKey::DeletedRecord(record_id),
+            &env.ledger().timestamp(),
+        );
+
+        // ── Secondary index update ────────────────────────────────────────────
+        // Remove this entry from the global type index atomically.
+        let idx_key = DataKey::GlobalTypeIndex(record_data.record_type.clone());
+        let mut type_index: Vec<TypeIndexEntry> = env
+            .storage()
+            .persistent()
+            .get(&idx_key)
+            .unwrap_or(Vec::new(&env));
+
+        let mut updated = Vec::new(&env);
+        for entry in type_index.iter() {
+            if entry.record_id != record_id {
+                updated.push_back(entry);
+            }
+        }
+        env.storage().persistent().set(&idx_key, &updated);
+        env.storage().persistent().extend_ttl(
+            &idx_key,
+            LEDGER_THRESHOLD,
+            LEDGER_BUMP_AMOUNT,
+        );
+        // ─────────────────────────────────────────────────────────────────────
+
+        env.events().publish(
+            (symbol_short!("rec_del"), patient),
+            (record_id, env.ledger().timestamp()),
+        );
+
+        Ok(())
+    }
+
+    /// Returns every (patient, record_id) pair indexed under `record_type`.
+    ///
+    /// **Admin-only.** Non-admins receive `NotAuthorized`.
+    pub fn get_global_records_by_type(
+        env: Env,
+        record_type: Symbol,
+    ) -> Result<Vec<TypeIndexEntry>, ContractError> {
+        Self::require_admin(&env);
+
+        let idx_key = DataKey::GlobalTypeIndex(record_type);
+        let index: Vec<TypeIndexEntry> = env
+            .storage()
+            .persistent()
+            .get(&idx_key)
+            .unwrap_or(Vec::new(&env));
+
+        if env.storage().persistent().has(&idx_key) {
+            env.storage().persistent().extend_ttl(
+                &idx_key,
+                LEDGER_THRESHOLD,
+                LEDGER_BUMP_AMOUNT,
+            );
+        }
+
+        Ok(index)
+    }
+
+    /// Returns the count of active (non-deleted) records of the given type
+    /// across all patients.
+    ///
+    /// **Admin-only.** Non-admins receive `NotAuthorized`.
+    pub fn get_global_type_count(
+        env: Env,
+        record_type: Symbol,
+    ) -> Result<u64, ContractError> {
+        Self::require_admin(&env);
+
+        let idx_key = DataKey::GlobalTypeIndex(record_type);
+        let index: Vec<TypeIndexEntry> = env
+            .storage()
+            .persistent()
+            .get(&idx_key)
+            .unwrap_or(Vec::new(&env));
+
+        Ok(index.len() as u64)
     }
 
     // =====================================================

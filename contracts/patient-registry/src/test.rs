@@ -2,10 +2,8 @@
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
-    Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Vec,
     testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke},
-    Address, Bytes, BytesN, Env, IntoVal, String, Symbol,
+    Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Vec,
 };
 
 fn make_cid_v1(env: &Env, seed: u8) -> Bytes {
