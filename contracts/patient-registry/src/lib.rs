@@ -87,6 +87,9 @@ pub enum DataKey {
     Treasury,
     FeeToken,
     TotalPatients,
+    TotalRecordsCreated,
+    TotalProviders,
+    TotalAccessGrants,
     /// Nonce counter per patient for share-link token generation.
     ShareNonce(Address),
     /// Share link data keyed by token hash.
@@ -263,6 +266,9 @@ impl MedicalRegistry {
         env.storage().instance().set(&DataKey::FeeToken, &fee_token);
         env.storage().instance().set(&DataKey::RecordFee, &0i128);
         env.storage().instance().set(&DataKey::TotalPatients, &0u64);
+        env.storage().instance().set(&DataKey::TotalRecordsCreated, &0u64);
+        env.storage().instance().set(&DataKey::TotalProviders, &0u64);
+        env.storage().instance().set(&DataKey::TotalAccessGrants, &0u64);
         env.storage().instance().set(&DataKey::RecordCounter, &0u64);
     }
 
@@ -408,6 +414,30 @@ impl MedicalRegistry {
                 }
             }
         }
+    }
+
+    pub fn get_total_records_created(env: Env) -> u64 {
+        Self::require_admin(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::TotalRecordsCreated)
+            .unwrap_or(0u64)
+    }
+
+    pub fn get_total_providers(env: Env) -> u64 {
+        Self::require_admin(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::TotalProviders)
+            .unwrap_or(0u64)
+    }
+
+    pub fn get_total_access_grants(env: Env) -> u64 {
+        Self::require_admin(&env);
+        env.storage()
+            .instance()
+            .get(&DataKey::TotalAccessGrants)
+            .unwrap_or(0u64)
     }
 
     // =====================================================
@@ -689,6 +719,15 @@ impl MedicalRegistry {
             .persistent()
             .set(&DataKey::DoctorList, &doc_list);
 
+        let total_providers: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalProviders)
+            .unwrap_or(0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalProviders, &(total_providers + 1));
+
         env.events()
             .publish((symbol_short!("reg_doc"), wallet), symbol_short!("success"));
     }
@@ -735,6 +774,15 @@ impl MedicalRegistry {
         institution_wallet.require_auth();
         let key = DataKey::Institution(institution_wallet);
         env.storage().persistent().set(&key, &true);
+
+        let total_providers: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalProviders)
+            .unwrap_or(0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalProviders, &(total_providers + 1));
     }
 
     // =====================================================
@@ -751,9 +799,20 @@ impl MedicalRegistry {
             .storage()
             .persistent()
             .get(&key)
-            .unwrap_or(Map::new(&env));
+            .unwrapOr(Map::new(&env));
 
-        map.set(doctor, true);
+        if !map.contains_key(doctor.clone()) {
+            let total_access_grants: u64 = env
+                .storage()
+                .instance()
+                .get(&DataKey::TotalAccessGrants)
+                .unwrap_or(0u64);
+            env.storage()
+                .instance()
+                .set(&DataKey::TotalAccessGrants, &(total_access_grants + 1));
+        }
+
+        map.set(doctor.clone(), true);
         env.storage().persistent().set(&key, &map);
     }
 
@@ -768,6 +827,18 @@ impl MedicalRegistry {
             .persistent()
             .get(&key)
             .unwrap_or(Map::new(&env));
+
+        if map.contains_key(doctor.clone()) {
+            let total_access_grants: u64 = env
+                .storage()
+                .instance()
+                .get(&DataKey::TotalAccessGrants)
+                .unwrap_or(0u64);
+            let new_total = total_access_grants.saturating_sub(1);
+            env.storage()
+                .instance()
+                .set(&DataKey::TotalAccessGrants, &new_total);
+        }
 
         map.remove(doctor);
         env.storage().persistent().set(&key, &map);
@@ -905,6 +976,16 @@ impl MedicalRegistry {
         env.storage()
             .persistent()
             .set(&DataKey::MedicalRecords(patient.clone()), &records);
+
+        // Increment total records created
+        let total_records: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalRecordsCreated)
+            .unwrap_or(0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalRecordsCreated, &(total_records + 1));
 
         // Append to patient's record IDs
         let ids_key = DataKey::PatientRecordIds(patient.clone());

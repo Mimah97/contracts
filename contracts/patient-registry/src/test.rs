@@ -127,6 +127,94 @@ fn test_total_patients_increments_on_register() {
 }
 
 #[test]
+fn test_analytics_counters_admin_only() {
+    let env = Env::default();
+    let contract_id = env.register(MedicalRegistry, ());
+    let client = MedicalRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fee_token = Address::generate(&env);
+    let patient = Address::generate(&env);
+    let v1 = make_version(&env, 1);
+
+    env.mock_all_auths();
+    client.initialize(&admin, &treasury, &fee_token);
+    client.publish_consent_version(&v1);
+    client.register_patient(&patient, &String::from_str(&env, "P1"), &631152000, &String::from_str(&env, "ipfs://p1"));
+
+    // non-admin access should fail
+    let attacker = Address::generate(&env);
+    let result = client.try_get_total_records_created(&attacker);
+    assert!(result.is_err());
+
+    let result = client.try_get_total_providers(&attacker);
+    assert!(result.is_err());
+
+    let result = client.try_get_total_access_grants(&attacker);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_total_records_created_increments_on_add_record() {
+    let env = Env::default();
+    let (client, _admin, patient, doctor, _v1) = setup_for_ttl(&env);
+
+    let before = client.get_total_records_created();
+    assert_eq!(before, 0);
+
+    client.add_medical_record(&patient, &doctor, &make_cid_v1(&env, 11), &String::from_str(&env, "Lab"), &Symbol::new(&env, "LAB"));
+    let after = client.get_total_records_created();
+    assert_eq!(after, 1);
+}
+
+#[test]
+fn test_total_providers_increment_on_register() {
+    let env = Env::default();
+    let contract_id = env.register(MedicalRegistry, ());
+    let client = MedicalRegistryClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let fee_token = Address::generate(&env);
+    let doctor = Address::generate(&env);
+    let institution = Address::generate(&env);
+    let v1 = make_version(&env, 1);
+
+    env.mock_all_auths();
+    client.initialize(&admin, &treasury, &fee_token);
+    client.publish_consent_version(&v1);
+
+    assert_eq!(client.get_total_providers(), 0);
+
+    client.register_doctor(&doctor, &String::from_str(&env, "Dr"), &String::from_str(&env, "Spec"), &make_cid_v1(&env, 2));
+    assert_eq!(client.get_total_providers(), 1);
+
+    client.register_institution(&institution);
+    assert_eq!(client.get_total_providers(), 2);
+}
+
+#[test]
+fn test_total_access_grants_increments_on_grant_and_decrements_on_revoke() {
+    let env = Env::default();
+    let (client, _admin, patient, doctor, _v1) = setup_for_ttl(&env);
+    let other_doctor = Address::generate(&env);
+
+    assert_eq!(client.get_total_access_grants(), 0);
+
+    client.grant_access(&patient, &patient, &doctor);
+    assert_eq!(client.get_total_access_grants(), 1);
+
+    // granting same doctor again should not increment
+    client.grant_access(&patient, &patient, &doctor);
+    assert_eq!(client.get_total_access_grants(), 1);
+
+    client.grant_access(&patient, &patient, &other_doctor);
+    assert_eq!(client.get_total_access_grants(), 2);
+
+    client.revoke_access(&patient, &patient, &doctor);
+    assert_eq!(client.get_total_access_grants(), 1);
+}
+
+#[test]
 fn test_total_patients_not_incremented_on_failed_register() {
     let env = Env::default();
     let contract_id = env.register(MedicalRegistry, ());
