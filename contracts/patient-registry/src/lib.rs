@@ -2,13 +2,12 @@
 #![allow(deprecated)]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token, xdr::ToXdr, Address,
-    Bytes, BytesN, Env, Map, String, Symbol, Vec,
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
-    Address, Bytes, BytesN, Env, Map, String, Symbol, Vec,
+    xdr::ToXdr, Address, Bytes, BytesN, Env, Map, String, Symbol, Vec,
 };
 
 pub mod validation;
+pub mod merkle;
 pub const NEW_RECORD_TOPIC: &str = "new_record";
 
 // =====================================================
@@ -94,6 +93,18 @@ pub enum DataKey {
     ShareLink(BytesN<32>),
     /// Marks a patient as deregistered (value: timestamp of deregistration).
     Deregistered(Address),
+    /// Contract-frozen flag (bool).
+    Frozen,
+    /// Global monotonic record counter (u64, instance storage).
+    RecordCounter,
+    /// Per-patient ordered list of record IDs (Vec<u64>).
+    PatientRecordIds(Address),
+    /// Individual record data keyed by global record ID.
+    MedicalRecord(u64),
+    /// Platform-wide secondary index: record_type → Vec<TypeIndexEntry>.
+    GlobalTypeIndex(Symbol),
+    /// Soft-delete tombstone for a record (value: timestamp of deletion).
+    DeletedRecord(u64),
 }
 
 /// --------------------
@@ -106,11 +117,15 @@ pub struct ShareLinkData {
     pub record_id: u64,
     pub uses_remaining: u32,
     pub expires_at: u64,
-    RecordCounter(Address),
-    Frozen,
-    RecordCounter,
-    PatientRecordIds(Address),
-    MedicalRecord(u64),
+}
+
+/// One entry in the platform-wide secondary index.
+/// Maps a `record_type` to the patient who owns it and the global record ID.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TypeIndexEntry {
+    pub patient: Address,
+    pub record_id: u64,
 }
 
 #[contracttype]
@@ -825,7 +840,7 @@ impl MedicalRegistry {
 
         let timestamp = env.ledger().timestamp();
 
-        // Get next record ID
+        // Advance global monotonic record counter (instance storage).
         let mut record_id: u64 = env
             .storage()
             .instance()
@@ -844,7 +859,7 @@ impl MedicalRegistry {
 
         let record_data = RecordData {
             patient: patient.clone(),
-            record_type,
+            record_type: record_type.clone(),
             description,
             current_ipfs: record_hash.clone(),
             history: {
@@ -875,6 +890,7 @@ impl MedicalRegistry {
             record_type: record_type.clone(),
         };
 
+        // Store record data (using cloned values)
         env.storage()
             .persistent()
             .set(&DataKey::MedicalRecord(record_id), &record_data);
@@ -900,7 +916,27 @@ impl MedicalRegistry {
         ids.push_back(record_id);
         env.storage().persistent().set(&ids_key, &ids);
 
-        // TTL bump
+        // ── Secondary index update ────────────────────────────────────────────
+        // Atomically append (patient, record_id) to the global type index.
+        let idx_key = DataKey::GlobalTypeIndex(record_type.clone());
+        let mut type_index: Vec<TypeIndexEntry> = env
+            .storage()
+            .persistent()
+            .get(&idx_key)
+            .unwrap_or(Vec::new(&env));
+        type_index.push_back(TypeIndexEntry {
+            patient: patient.clone(),
+            record_id,
+        });
+        env.storage().persistent().set(&idx_key, &type_index);
+        env.storage().persistent().extend_ttl(
+            &idx_key,
+            LEDGER_THRESHOLD,
+            LEDGER_BUMP_AMOUNT,
+        );
+        // ─────────────────────────────────────────────────────────────────────
+
+        // TTL bumps for per-patient and per-record keys.
         Self::bump_patient_keys(&env, &patient);
         env.storage().persistent().extend_ttl(
             &DataKey::MedicalRecord(record_id),
@@ -910,22 +946,10 @@ impl MedicalRegistry {
         env.storage()
             .persistent()
             .extend_ttl(&ids_key, LEDGER_THRESHOLD, LEDGER_BUMP_AMOUNT);
-        // Emit provider-to-patient record notification
+
         env.events().publish(
-            (
-                Symbol::new(&env, NEW_RECORD_TOPIC),
-                patient.clone(),
-                doctor,
-            ),
+            (Symbol::new(&env, NEW_RECORD_TOPIC), patient.clone(), doctor.clone()),
             (record_id, record_type, timestamp),
-        );
-
-        // Extend TTL for all patient persistent entries after writing a record
-        Self::bump_patient_keys(&env, &patient);
-
-        env.events().publish(
-            (symbol_short!("record_added"), record_id),
-            (patient, doctor),
         );
 
         Ok(record_id)
@@ -1039,7 +1063,9 @@ impl MedicalRegistry {
     /// Returns an empty vec (not an error) when no records match.
     pub fn update_record(
         env: Env,
+        caller: Address,
         record_id: u64,
+        caller: Address,
         new_ipfs_hash: Bytes,
     ) -> Result<(), ContractError> {
         Self::require_not_frozen(&env);
@@ -1049,7 +1075,7 @@ impl MedicalRegistry {
             .storage()
             .persistent()
             .get(&record_key)
-            .ok_or(Error::NotFound)?;
+            .ok_or(ContractError::NotFound)?;
 
         let patient = record_data.patient.clone();
         Self::require_patient_exists(&env, &patient);
@@ -1081,7 +1107,12 @@ impl MedicalRegistry {
             .extend_ttl(&record_key, LEDGER_THRESHOLD, LEDGER_BUMP_AMOUNT);
 
         env.events()
-            .publish(symbol_short!("rec_updtd")(patient, caller));
+            .publish((
+                symbol_short!("rec_upd"),
+                (patient.clone(), caller.clone()),
+            ),
+            record_id,
+        );
 
         Ok(())
     }
@@ -1122,15 +1153,17 @@ impl MedicalRegistry {
 
         let mut filtered = Vec::new(&env);
         for id in record_ids.iter() {
-            if let Some(record_data) = env.storage().persistent().get(&DataKey::MedicalRecord(id)) {
+            let record_id: u64 = id.into();
+            if let Some(record_data) = env.storage().persistent().get::<DataKey, RecordData>(&DataKey::MedicalRecord(record_id)) {
                 if record_data.record_type == record_type {
                     // Map to MedicalRecord for compatibility
                     let mr = MedicalRecord {
+                        record_id,
                         doctor: record_data
                             .history
                             .get(0)
                             .map(|v| v.updated_by.clone())
-                            .unwrap_or(Address::generate(&env)),
+                            .unwrap_or_else(|| Address::from_str(&env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4")),
                         record_hash: record_data.current_ipfs.clone(),
                         description: record_data.description.clone(),
                         timestamp: record_data
@@ -1138,7 +1171,7 @@ impl MedicalRegistry {
                             .get(0)
                             .map(|v| v.updated_at)
                             .unwrap_or(0),
-                        record_type,
+                        record_type: record_type.clone(),
                     };
                     filtered.push_back(mr);
                 }
@@ -1393,6 +1426,119 @@ impl MedicalRegistry {
     }
 
     // =====================================================
+    //           GLOBAL SECONDARY INDEX (ADMIN)
+    // =====================================================
+
+    /// Soft-delete a record: marks it as deleted and atomically removes it from
+    /// the global type index.
+    ///
+    /// Callable by the owning patient, their guardian, or an authorized doctor.
+    /// After deletion the record data is retained for audit purposes but will no
+    /// longer appear in index queries.
+    pub fn soft_delete_record(env: Env, record_id: u64, caller: Address) -> Result<(), ContractError> {
+        Self::require_not_frozen(&env);
+
+        let record_key = DataKey::MedicalRecord(record_id);
+        let record_data: RecordData = env
+            .storage()
+            .persistent()
+            .get(&record_key)
+            .ok_or(ContractError::NotFound)?;
+
+        let patient = record_data.patient.clone();
+        Self::require_patient_exists(&env, &patient);
+        require_record_access(&env, &patient, &caller);
+
+        // Guard: already deleted?
+        if env.storage().persistent().has(&DataKey::DeletedRecord(record_id)) {
+            panic!("Record already deleted");
+        }
+
+        // Stamp the tombstone.
+        env.storage().persistent().set(
+            &DataKey::DeletedRecord(record_id),
+            &env.ledger().timestamp(),
+        );
+
+        // ── Secondary index update ────────────────────────────────────────────
+        // Remove this entry from the global type index atomically.
+        let idx_key = DataKey::GlobalTypeIndex(record_data.record_type.clone());
+        let mut type_index: Vec<TypeIndexEntry> = env
+            .storage()
+            .persistent()
+            .get(&idx_key)
+            .unwrap_or(Vec::new(&env));
+
+        let mut updated = Vec::new(&env);
+        for entry in type_index.iter() {
+            if entry.record_id != record_id {
+                updated.push_back(entry);
+            }
+        }
+        env.storage().persistent().set(&idx_key, &updated);
+        env.storage().persistent().extend_ttl(
+            &idx_key,
+            LEDGER_THRESHOLD,
+            LEDGER_BUMP_AMOUNT,
+        );
+        // ─────────────────────────────────────────────────────────────────────
+
+        env.events().publish(
+            (symbol_short!("rec_del"), patient),
+            (record_id, env.ledger().timestamp()),
+        );
+
+        Ok(())
+    }
+
+    /// Returns every (patient, record_id) pair indexed under `record_type`.
+    ///
+    /// **Admin-only.** Non-admins receive `NotAuthorized`.
+    pub fn get_global_records_by_type(
+        env: Env,
+        record_type: Symbol,
+    ) -> Result<Vec<TypeIndexEntry>, ContractError> {
+        Self::require_admin(&env);
+
+        let idx_key = DataKey::GlobalTypeIndex(record_type);
+        let index: Vec<TypeIndexEntry> = env
+            .storage()
+            .persistent()
+            .get(&idx_key)
+            .unwrap_or(Vec::new(&env));
+
+        if env.storage().persistent().has(&idx_key) {
+            env.storage().persistent().extend_ttl(
+                &idx_key,
+                LEDGER_THRESHOLD,
+                LEDGER_BUMP_AMOUNT,
+            );
+        }
+
+        Ok(index)
+    }
+
+    /// Returns the count of active (non-deleted) records of the given type
+    /// across all patients.
+    ///
+    /// **Admin-only.** Non-admins receive `NotAuthorized`.
+    pub fn get_global_type_count(
+        env: Env,
+        record_type: Symbol,
+    ) -> Result<u64, ContractError> {
+        Self::require_admin(&env);
+
+        let idx_key = DataKey::GlobalTypeIndex(record_type);
+        let index: Vec<TypeIndexEntry> = env
+            .storage()
+            .persistent()
+            .get(&idx_key)
+            .unwrap_or(Vec::new(&env));
+
+        Ok(index.len() as u64)
+    }
+
+    // =====================================================
     //                  PRIVATE HELPERS
     // =====================================================
 
@@ -1446,14 +1592,28 @@ impl MedicalRegistry {
         }
     }
 
+    /// Recompute and persist the Merkle root for `patient` from their current
+    /// record-ID list.  Called by `add_medical_record` after every insertion.
+    fn update_merkle_root(env: &Env, patient: &Address, ids: &Vec<u64>) {
+        let root = merkle::compute_merkle_root(env, ids);
+        let root_key = DataKey::MerkleRoot(patient.clone());
+        env.storage().persistent().set(&root_key, &root);
+        env.storage().persistent().extend_ttl(
+            &root_key,
+            LEDGER_THRESHOLD,
+            LEDGER_BUMP_AMOUNT,
+        );
+    }
+
     /// Bump TTL for all critical persistent keys belonging to a patient.
     fn bump_patient_keys(env: &Env, patient: &Address) {
-        let keys: [DataKey; 5] = [
+        let keys: [DataKey; 6] = [
             DataKey::Patient(patient.clone()),
             DataKey::MedicalRecords(patient.clone()),
             DataKey::AuthorizedDoctors(patient.clone()),
             DataKey::PatientRecordIds(patient.clone()),
             DataKey::ConsentAck(patient.clone()),
+            DataKey::MerkleRoot(patient.clone()),
         ];
         for key in keys.iter() {
             if env.storage().persistent().has(key) {
