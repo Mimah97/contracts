@@ -71,3 +71,27 @@ pub fn validate_score_i32(score: i32) -> Result<(), ()> {
         Err(())
     }
 }
+
+#[cfg(test)]
+mod proptest_validators {
+    //! Property-based checks: validators must never panic (only `Ok` / `Err`).
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn prop_validate_cid_bytes_no_panic(bytes in prop::collection::vec(any::<u8>(), 0..600)) {
+            let _ = validate_cid_bytes(&bytes);
+        }
+
+        #[test]
+        fn prop_validate_did_bytes_no_panic(bytes in prop::collection::vec(any::<u8>(), 0..300)) {
+            let _ = validate_did_bytes(&bytes);
+        }
+
+        #[test]
+        fn prop_validate_score_i32_no_panic(score in any::<i32>()) {
+            let _ = validate_score_i32(score);
+        }
+    }
+}

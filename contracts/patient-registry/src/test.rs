@@ -136,22 +136,90 @@ fn test_analytics_counters_admin_only() {
     let fee_token = Address::generate(&env);
     let patient = Address::generate(&env);
     let v1 = make_version(&env, 1);
-
-    env.mock_all_auths();
-    client.initialize(&admin, &treasury, &fee_token);
-    client.publish_consent_version(&v1);
-    client.register_patient(&patient, &String::from_str(&env, "P1"), &631152000, &String::from_str(&env, "ipfs://p1"));
-
-    // non-admin access should fail
     let attacker = Address::generate(&env);
-    let result = client.try_get_total_records_created(&attacker);
-    assert!(result.is_err());
 
-    let result = client.try_get_total_providers(&attacker);
-    assert!(result.is_err());
+    client
+        .mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "initialize",
+                args: (&admin, &treasury, &fee_token).into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .initialize(&admin, &treasury, &fee_token);
 
-    let result = client.try_get_total_access_grants(&attacker);
-    assert!(result.is_err());
+    client
+        .mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "publish_consent_version",
+                args: (&v1,).into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .publish_consent_version(&v1);
+
+    client
+        .mock_auths(&[MockAuth {
+            address: &patient,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "register_patient",
+                args: (
+                    &patient,
+                    &String::from_str(&env, "P1"),
+                    &631152000u64,
+                    &String::from_str(&env, "ipfs://p1"),
+                )
+                    .into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .register_patient(
+            &patient,
+            &String::from_str(&env, "P1"),
+            &631152000,
+            &String::from_str(&env, "ipfs://p1"),
+        );
+
+    let inv1 = MockAuthInvoke {
+        contract: &contract_id,
+        fn_name: "get_total_records_created",
+        args: ().into_val(&env),
+        sub_invokes: &[],
+    };
+    let a1 = MockAuth {
+        address: &attacker,
+        invoke: &inv1,
+    };
+    assert!(client.mock_auths(&[a1]).try_get_total_records_created().is_err());
+
+    let inv2 = MockAuthInvoke {
+        contract: &contract_id,
+        fn_name: "get_total_providers",
+        args: ().into_val(&env),
+        sub_invokes: &[],
+    };
+    let a2 = MockAuth {
+        address: &attacker,
+        invoke: &inv2,
+    };
+    assert!(client.mock_auths(&[a2]).try_get_total_providers().is_err());
+
+    let inv3 = MockAuthInvoke {
+        contract: &contract_id,
+        fn_name: "get_total_access_grants",
+        args: ().into_val(&env),
+        sub_invokes: &[],
+    };
+    let a3 = MockAuth {
+        address: &attacker,
+        invoke: &inv3,
+    };
+    assert!(client.mock_auths(&[a3]).try_get_total_access_grants().is_err());
 }
 
 #[test]
@@ -198,7 +266,8 @@ fn test_total_access_grants_increments_on_grant_and_decrements_on_revoke() {
     let (client, _admin, patient, doctor, _v1) = setup_for_ttl(&env);
     let other_doctor = Address::generate(&env);
 
-    assert_eq!(client.get_total_access_grants(), 0);
+    // `setup_for_ttl` already granted `doctor` once.
+    assert_eq!(client.get_total_access_grants(), 1);
 
     client.grant_access(&patient, &patient, &doctor);
     assert_eq!(client.get_total_access_grants(), 1);
@@ -1866,7 +1935,10 @@ fn test_get_latest_record_returns_most_recent() {
         &Symbol::new(&env, "LAB"),
     );
 
-    let latest = client.get_latest_record(&patient, &patient).unwrap();
+    let latest = client
+        .try_get_latest_record(&patient, &patient)
+        .unwrap()
+        .unwrap();
     assert_eq!(latest.description, String::from_str(&env, "Second record"));
     assert_eq!(latest.timestamp, 2000);
 }

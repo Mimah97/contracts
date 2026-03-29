@@ -108,6 +108,8 @@ pub enum DataKey {
     GlobalTypeIndex(Symbol),
     /// Soft-delete tombstone for a record (value: timestamp of deletion).
     DeletedRecord(u64),
+    /// Merkle root over the patient's ordered record IDs (see `merkle` module).
+    MerkleRoot(Address),
 }
 
 /// --------------------
@@ -177,10 +179,11 @@ pub enum ContractError {
     InvalidCID = 1,
     InvalidToken = 2,
     NotAuthorized = 3,
-    InvalidDID = 2,
-    InvalidScore = 3,
-    ContractFrozen = 2,
-    NoRecordsFound = 4,
+    InvalidDID = 4,
+    InvalidScore = 5,
+    ContractFrozen = 6,
+    NoRecordsFound = 7,
+    NotFound = 8,
 }
 
 pub fn validate_cid(cid: &Bytes) -> Result<(), ContractError> {
@@ -799,7 +802,7 @@ impl MedicalRegistry {
             .storage()
             .persistent()
             .get(&key)
-            .unwrapOr(Map::new(&env));
+            .unwrap_or(Map::new(&env));
 
         if !map.contains_key(doctor.clone()) {
             let total_access_grants: u64 = env
@@ -931,7 +934,7 @@ impl MedicalRegistry {
         let record_data = RecordData {
             patient: patient.clone(),
             record_type: record_type.clone(),
-            description,
+            description: description.clone(),
             current_ipfs: record_hash.clone(),
             history: {
                 let mut h = Vec::new(&env);
@@ -940,17 +943,6 @@ impl MedicalRegistry {
             },
             latest_version: 1u64,
         };
-
-        let counter_key = DataKey::RecordCounter(patient.clone());
-        let record_id: u64 = env
-            .storage()
-            .persistent()
-            .get(&counter_key)
-            .unwrap_or(0u64)
-            + 1;
-        env.storage().persistent().set(&counter_key, &record_id);
-
-        let timestamp = env.ledger().timestamp();
 
         let record = MedicalRecord {
             record_id,
@@ -996,6 +988,7 @@ impl MedicalRegistry {
             .unwrap_or(Vec::new(&env));
         ids.push_back(record_id);
         env.storage().persistent().set(&ids_key, &ids);
+        Self::update_merkle_root(&env, &patient, &ids);
 
         // ── Secondary index update ────────────────────────────────────────────
         // Atomically append (patient, record_id) to the global type index.
@@ -1139,6 +1132,38 @@ impl MedicalRegistry {
         Ok(latest)
     }
 
+    /// Merkle root over the patient's ordered record IDs (see `merkle` module).
+    /// If no root was persisted yet, recomputes from `PatientRecordIds` (or empty sentinel).
+    pub fn get_merkle_root(env: Env, patient: Address) -> BytesN<32> {
+        let key = DataKey::MerkleRoot(patient.clone());
+        if let Some(root) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, BytesN<32>>(&key)
+        {
+            root
+        } else {
+            let ids_key = DataKey::PatientRecordIds(patient);
+            let ids: Vec<u64> = env
+                .storage()
+                .persistent()
+                .get(&ids_key)
+                .unwrap_or(Vec::new(&env));
+            merkle::compute_merkle_root(&env, &ids)
+        }
+    }
+
+    /// Returns true iff `proof` is a valid Merkle membership proof for `record_id` under this patient's root.
+    pub fn verify_record_membership(
+        env: Env,
+        patient: Address,
+        record_id: u64,
+        proof: Vec<BytesN<32>>,
+    ) -> bool {
+        let root = Self::get_merkle_root(env.clone(), patient);
+        merkle::verify_membership(&env, record_id, &proof, &root)
+    }
+
     /// Returns all records for `patient` whose `record_type` matches the given symbol.
     /// Access control: caller must be the patient, their guardian, or an authorized doctor.
     /// Returns an empty vec (not an error) when no records match.
@@ -1146,7 +1171,6 @@ impl MedicalRegistry {
         env: Env,
         caller: Address,
         record_id: u64,
-        caller: Address,
         new_ipfs_hash: Bytes,
     ) -> Result<(), ContractError> {
         Self::require_not_frozen(&env);
@@ -1544,7 +1568,7 @@ impl MedicalRegistry {
         // ── Secondary index update ────────────────────────────────────────────
         // Remove this entry from the global type index atomically.
         let idx_key = DataKey::GlobalTypeIndex(record_data.record_type.clone());
-        let mut type_index: Vec<TypeIndexEntry> = env
+        let type_index: Vec<TypeIndexEntry> = env
             .storage()
             .persistent()
             .get(&idx_key)
